@@ -372,6 +372,20 @@ function decodeCBOR(buf) {
         node.type = "tag";
         node.tag = h.val;
         node.children = [decodeItem()];
+        // #6.24(bytes .cbor X): inline datum / script_ref — decode wrapped bytes as nested CBOR.
+        if (h.val === 24) {
+          const bn = node.children[0];
+          if (bn.type === "bytes" && !bn.children) {
+            const cStart = bn.end - bn.value.length; // start of byte-string contents
+            const saved = pos;
+            try {
+              pos = cStart;
+              const inner = decodeItem();
+              if (pos === bn.end) node.inner = inner; // fully consumed → it really was CBOR
+            } catch (e) { /* not valid CBOR; leave as raw bytes */ }
+            pos = saved;
+          }
+        }
         break;
       }
       case 7: {
@@ -496,13 +510,45 @@ function escapeHtml(s) {
   return s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 }
 
+// Big-endian bytes → BigInt, for Plutus big_uint/big_nint (#6.2 / #6.3).
+function bytesToBigInt(arr) {
+  let n = 0n;
+  for (const b of arr) n = (n << 8n) | BigInt(b);
+  return n;
+}
+
+// Plutus constructor index from its CBOR tag, or null if not a constr tag.
+function constrIndex(tag) {
+  if (tag >= 121 && tag <= 127) return tag - 121;       // ctor 0..6
+  if (tag >= 1280 && tag <= 1535) return tag - 1280 + 7; // ctor 7..262
+  return null;
+}
+
+function tagHeader(node) {
+  const t = node.tag;
+  const ci = constrIndex(t);
+  if (ci !== null) return `<span class="label">Constr ${ci}</span> <span class="v-type">· plutus data</span>`;
+  if (t === 102) return `<span class="label">Constr</span> <span class="v-type">· general #6.102 [index, fields]</span>`;
+  if (t === 2 || t === 3) {
+    const b = node.children[0];
+    let big = bytesToBigInt(b.value);
+    if (t === 3) big = -1n - big;
+    return `<span class="v-number">${big.toString()}</span> <span class="v-type">· bignum #6.${t}</span>`;
+  }
+  if (t === 258) return `<span class="v-type">set · #6.258</span>`;
+  if (t === 259) return `<span class="v-type">auxiliary_data · #6.259</span>`;
+  if (t === 24) return `<span class="label">encoded CBOR</span> <span class="v-type">· #6.24${node.inner ? " (decoded below)" : ""}</span>`;
+  if (t === 30) return `<span class="v-type">rational · #6.30</span>`;
+  return `<span class="v-type">tag(${t})</span>`;
+}
+
 function nodeHeader(node) {
   let s = "";
   if (node.label) s += `<span class="label">${node.label}</span> `;
   switch (node.type) {
     case "array": s += `<span class="v-type">[array, ${node.children.length}${node.indefinite ? ", _" : ""}]</span>`; break;
     case "map": s += `<span class="v-type">{map, ${node.children.length}${node.indefinite ? ", _" : ""}}</span>`; break;
-    case "tag": s += `<span class="v-type">tag(${node.tag})</span>`; break;
+    case "tag": s += tagHeader(node); break;
     default: s += valuePreview(node);
   }
   return s;
@@ -588,7 +634,11 @@ function renderNode(node, prefixHtml) {
         childWrap.appendChild(valNode);
       }
     } else if (node.type === "tag") {
-      childWrap.appendChild(renderNode(node.children[0], ""));
+      if (node.inner) {
+        childWrap.appendChild(renderNode(node.inner, '<span class="v-type">decoded ⇒ </span>'));
+      } else {
+        childWrap.appendChild(renderNode(node.children[0], ""));
+      }
     } else {
       for (const c of node.children) childWrap.appendChild(renderNode(c, ""));
     }
@@ -687,13 +737,14 @@ document.getElementById("sample").addEventListener("click", () => {
   run();
 });
 
-// A small, valid simple-transaction CBOR: 1 input, 1 output, fee, ttl,
-// empty witness set, is_valid=true, no auxiliary data.
+// A rich "everything" Conway tx, exercising: inputs as a set (#6.258),
+// a Babbage map-output with multiasset value + inline datum (#6.24 → Constr)
+// + reference script (#6.24 → script), legacy change output, mint, collateral,
+// required signers, network id, collateral return/total, reference inputs;
+// witnesses with vkey + native script + plutus_data + redeemers (map form)
+// + plutus_v2 script; and #6.259 auxiliary_data (674 message metadata).
 const SAMPLE_TX =
-  "84a400818258203b40265111d8bb3c3c608d95b3a0bf83461ace32d79336579a1939b3" +
-  "aad1c0b7000181825839001f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f" +
-  "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1a002d" +
-  "c6c0021a0002a8ad03190bb8a0f5f6";
+  "84ac00d90102828258203b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b008258209f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f010182a400583901111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222201821a001e8480a1581ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a14954657374546f6b656e1903e8028201d8184dd87983182a44deadbeefd87a8003d8184c820249590a1c0000000000008258390133333333333333333333333333333333333333333333333333333333444444444444444444444444444444444444444444444444444444441a00969f82021a0002b811031a047ce08009a1581ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a14954657374546f6b656e1903e80b58205d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d0dd90102818258203b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b000ed9010281581c777777777777777777777777777777777777777777777777777777770f01108258390133333333333333333333333333333333333333333333333333333333444444444444444444444444444444444444444444444444444444441a004c4b40111a007270e012d90102818258209f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f00a500d9010281825820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5840bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb01d90102818201818200581c7777777777777777777777777777777777777777777777777777777704d9010281d879820142cafe05a182000082d8798107821a0007a1201a0bebc20006d90102814b59020a0000000000000000f5d90103a100a11902a2a1636d7367816d48656c6c6f2043617264616e6f";
 
 wireByteHover();
 wireByteValueClicks();
