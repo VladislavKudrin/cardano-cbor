@@ -4,92 +4,203 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Cardano CBOR Decoder</title>
+<meta name="description" content="Paste Cardano transaction CBOR and read it as labeled CDDL structure with byte-level highlighting.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #0d1117;
-    --panel: #161b22;
-    --border: #30363d;
-    --text: #c9d1d9;
-    --muted: #8b949e;
-    --accent: #58a6ff;
-    --key: #79c0ff;
-    --string: #a5d6ff;
-    --number: #d2a8ff;
-    --bytes: #ffa657;
-    --label: #7ee787;
-    --hl: #1f6feb;
-    --hl-bg: rgba(56, 139, 253, 0.25);
+    color-scheme: dark;
+    font-family: "Space Grotesk", sans-serif;
+    line-height: 1.5;
+    color: #f4f8f7;
+    background:
+      radial-gradient(circle at top left, rgba(79, 209, 197, 0.18), transparent 28%),
+      radial-gradient(circle at top right, rgba(53, 141, 135, 0.22), transparent 24%),
+      linear-gradient(135deg, #07111b 0%, #0b1623 54%, #102532 100%);
+    background-attachment: fixed;
+    -webkit-font-smoothing: antialiased;
+    --surface: rgba(10, 18, 28, 0.78);
+    --surface-strong: rgba(8, 14, 22, 0.92);
+    --border: rgba(216, 243, 238, 0.14);
+    --accent: #4fd1c5;
+    --accent-strong: #38b2ac;
+    --ink-dark: #07111b;
+    --muted: #9eb4c5;
+    --success: #5dd39e;
+    --danger: #ff8f7d;
+    /* token colors for the decoded tree */
+    --key: #7fdbff;
+    --string: #c4f1e8;
+    --number: #c9b3ff;
+    --bytes: #ffd28a;
+    --label: #4fd1c5;
+    --hl: rgba(79, 209, 197, 0.65);
+    --hl-bg: rgba(79, 209, 197, 0.16);
   }
   * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    font-size: 14px;
+  html, body { margin: 0; min-height: 100%; }
+  body { min-height: 100vh; }
+  a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(79, 209, 197, 0.35); transition: border-color 160ms ease; }
+  a:hover { border-bottom-color: var(--accent); }
+  button, input, textarea, select { font: inherit; }
+
+  .shell {
+    width: min(1180px, calc(100% - 32px));
+    margin: 0 auto;
+    padding: 28px 0 48px;
   }
-  header {
-    padding: 16px 24px;
-    border-bottom: 1px solid var(--border);
+
+  /* masthead */
+  .masthead {
     display: flex;
-    align-items: baseline;
+    justify-content: space-between;
+    gap: 20px;
+    align-items: center;
+    margin-bottom: 24px;
+    opacity: 0;
+    transform: translateY(14px);
+    animation: rise 0.6s ease forwards;
+  }
+  .brand {
+    display: inline-flex;
     gap: 12px;
+    align-items: center;
+    font-size: 0.9rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
   }
-  header h1 { font-size: 18px; margin: 0; }
-  header .sub { color: var(--muted); font-size: 13px; }
-  .input-area {
-    padding: 16px 24px;
-    border-bottom: 1px solid var(--border);
+  .brand-badge {
+    width: 14px;
+    height: 14px;
+    border-radius: 999px;
+    background: linear-gradient(135deg, var(--accent), #2c7a7b);
+    box-shadow: 0 0 24px rgba(79, 209, 197, 0.5);
   }
-  textarea {
-    width: 100%;
-    min-height: 90px;
-    background: var(--panel);
-    color: var(--text);
+  .network-pill {
     border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 12px;
-    font-family: "SF Mono", Menlo, Consolas, monospace;
-    font-size: 13px;
+    border-radius: 999px;
+    padding: 8px 14px;
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--muted);
+    font-size: 0.82rem;
+  }
+
+  /* panels */
+  .hero, .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 28px;
+    backdrop-filter: blur(18px);
+    box-shadow: 0 28px 80px rgba(0, 0, 0, 0.25);
+    opacity: 0;
+    transform: translateY(18px);
+    animation: rise 0.75s ease forwards;
+  }
+  .hero { padding: 30px 34px; position: relative; overflow: hidden; animation-delay: 0.08s; }
+  .hero::after {
+    content: "";
+    position: absolute;
+    inset: auto -80px -110px auto;
+    width: 240px; height: 240px;
+    background: radial-gradient(circle, rgba(79, 209, 197, 0.18), transparent 66%);
+  }
+  .panel { padding: 24px 26px; margin-top: 20px; animation-delay: 0.16s; }
+
+  .eyebrow {
+    margin: 0 0 12px;
+    font-size: 0.78rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .title {
+    margin: 0;
+    font-size: clamp(2.2rem, 5vw, 3.6rem);
+    line-height: 0.98;
+  }
+  .lede {
+    margin: 16px 0 0;
+    max-width: 60ch;
+    color: var(--muted);
+    font-size: 1.02rem;
+  }
+
+  /* input panel */
+  .label-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: baseline;
+    margin-bottom: 10px;
+  }
+  .label-row label { font-size: 0.95rem; }
+  .hint { color: var(--muted); font-size: 0.82rem; }
+  textarea#input {
+    width: 100%;
+    min-height: 96px;
+    background: var(--surface-strong);
+    color: #eafbf7;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 18px;
+    padding: 15px 16px;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.88rem;
     resize: vertical;
+    transition: border-color 160ms ease;
   }
-  .controls { margin-top: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  button {
-    background: #238636;
-    color: #fff;
-    border: none;
-    padding: 7px 16px;
-    border-radius: 6px;
+  textarea#input:focus { outline: none; border-color: rgba(79, 209, 197, 0.55); }
+
+  .controls { margin-top: 14px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .button, .secondary-button {
+    border-radius: 14px;
+    border: 1px solid transparent;
+    padding: 11px 20px;
     cursor: pointer;
-    font-size: 13px;
-    font-weight: 600;
+    transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
   }
-  button.secondary { background: #21262d; border: 1px solid var(--border); color: var(--text); }
-  button:hover { filter: brightness(1.1); }
-  .err { color: #f85149; font-size: 13px; }
+  .button {
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+    color: var(--ink-dark);
+    font-weight: 700;
+  }
+  .secondary-button {
+    background: rgba(255, 255, 255, 0.04);
+    border-color: rgba(255, 255, 255, 0.08);
+    color: #eafbf7;
+  }
+  .button:hover, .secondary-button:hover { transform: translateY(-1px); }
+  .err { margin-top: 14px; color: var(--danger); font-size: 0.88rem; min-height: 1.2em; }
+
+  /* panes */
   .panes {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 0;
-    height: calc(100vh - 320px);
+    gap: 20px;
+    height: calc(100vh - 360px);
     min-height: 360px;
   }
   .pane {
     overflow: auto;
-    padding: 16px 24px;
+    padding: 18px 18px;
+    background: var(--surface-strong);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 20px;
   }
-  .pane.left { border-right: 1px solid var(--border); }
-  .pane h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 12px; }
+  .pane h2 { margin: 0 0 14px; }
+
   /* hex view */
-  #hex { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px; line-height: 1.7; }
-  .byte { padding: 1px 1px; border-radius: 3px; cursor: default; }
+  #hex { font-family: "IBM Plex Mono", monospace; font-size: 0.84rem; line-height: 1.85; color: #cfe6e2; }
+  .byte { padding: 1px 1px; border-radius: 4px; cursor: default; }
   .byte.hl { background: var(--hl-bg); outline: 1px solid var(--hl); }
+
   /* tree view */
-  .tree { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px; }
-  .node { padding-left: 18px; border-left: 1px solid transparent; }
-  .node > .row { padding: 2px 4px; border-radius: 4px; cursor: pointer; white-space: pre-wrap; }
+  .tree { font-family: "IBM Plex Mono", monospace; font-size: 0.84rem; }
+  .node { padding-left: 18px; }
+  .node > .row { padding: 2px 5px; border-radius: 6px; cursor: pointer; white-space: pre-wrap; }
   .node > .row:hover, .node.hl > .row { background: var(--hl-bg); }
-  .label { color: var(--label); }
+  .label { color: var(--label); font-weight: 500; }
   .twisty { color: var(--muted); display: inline-block; width: 12px; }
   .v-key { color: var(--key); }
   .v-string { color: var(--string); }
@@ -97,46 +208,71 @@
   .v-bytes { color: var(--bytes); }
   .bytes-val[data-expanded] { cursor: pointer; word-break: break-all; }
   .bytes-val:hover { text-decoration: underline; }
-  .copy-btn { cursor: pointer; color: var(--muted); font-size: 12px; user-select: none; }
+  .copy-btn { cursor: pointer; color: var(--muted); font-size: 0.82rem; user-select: none; }
   .copy-btn:hover { color: var(--accent); }
-  .v-type { color: var(--muted); font-size: 11px; }
+  .v-type { color: var(--muted); font-size: 0.76rem; }
   .collapsed > .children { display: none; }
-  .decoded-extra { color: var(--accent); }
-  footer { padding: 10px 24px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); }
-  a { color: var(--accent); }
+
+  .footnote { margin-top: 18px; color: var(--muted); font-size: 0.82rem; }
+
+  @keyframes rise { to { opacity: 1; transform: translateY(0); } }
+
+  @media (max-width: 900px) {
+    .panes { grid-template-columns: 1fr; height: auto; }
+    .pane { max-height: 60vh; }
+  }
+  @media (max-width: 640px) {
+    .shell { width: min(100% - 20px, 100%); padding-top: 16px; }
+    .masthead { flex-direction: column; align-items: flex-start; }
+    .hero, .panel { padding: 20px; border-radius: 22px; }
+  }
 </style>
 </head>
 <body>
-<header>
-  <h1>Cardano CBOR Decoder</h1>
-  <span class="sub">paste tx CBOR hex → labeled structure with byte highlighting</span>
-</header>
+<div class="shell">
+  <header class="masthead">
+    <div class="brand"><span class="brand-badge"></span> Cardano Tools</div>
+    <div class="network-pill">Conway era · client-side</div>
+  </header>
 
-<div class="input-area">
-  <textarea id="input" placeholder="Paste Cardano transaction CBOR hex here (with or without 0x / whitespace)…"></textarea>
-  <div class="controls">
-    <button id="decode">Decode</button>
-    <button id="sample" class="secondary">Load sample tx</button>
-    <button id="clear" class="secondary">Clear</button>
-    <span id="error" class="err"></span>
-  </div>
+  <section class="hero">
+    <p class="eyebrow">CBOR Inspector</p>
+    <h1 class="title">Cardano CBOR Decoder</h1>
+    <p class="lede">Paste a transaction's CBOR hex and read it as labeled structure, following the <a href="https://github.com/IntersectMBO/cardano-ledger/blob/master/eras/conway/impl/cddl/data/conway.cddl" target="_blank" rel="noopener">Conway-era CDDL</a> spec. Hover any field to highlight its exact bytes — or hover the bytes to find the field.</p>
+  </section>
+
+  <section class="panel">
+    <div class="label-row">
+      <label for="input">Transaction CBOR</label>
+      <span class="hint">hex — with or without 0x / whitespace</span>
+    </div>
+    <textarea id="input" placeholder="84a4008182582…"></textarea>
+    <div class="controls">
+      <button id="decode" class="button">Decode</button>
+      <button id="sample" class="secondary-button">Load sample tx</button>
+      <button id="clear" class="secondary-button">Clear</button>
+    </div>
+    <div id="error" class="err"></div>
+  </section>
+
+  <section class="panel">
+    <div class="panes">
+      <div class="pane left">
+        <h2 class="eyebrow">Hex bytes</h2>
+        <div id="hex"></div>
+      </div>
+      <div class="pane right">
+        <h2 class="eyebrow">Decoded structure</h2>
+        <div id="tree" class="tree"></div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="footnote">
+    Pure client-side · no data leaves your browser · labels follow the
+    <a href="https://github.com/IntersectMBO/cardano-ledger/blob/master/eras/conway/impl/cddl/data/conway.cddl" target="_blank" rel="noopener">Conway-era CDDL</a>.
+  </footer>
 </div>
-
-<div class="panes">
-  <div class="pane left">
-    <h2>Hex bytes</h2>
-    <div id="hex"></div>
-  </div>
-  <div class="pane right">
-    <h2>Decoded structure</h2>
-    <div id="tree" class="tree"></div>
-  </div>
-</div>
-
-<footer>
-  Pure client-side · no data leaves your browser · Conway-era CDDL labels.
-  Hover a field or a byte to see the link.
-</footer>
 
 <script>
 "use strict";
