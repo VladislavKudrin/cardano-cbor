@@ -556,11 +556,15 @@ function nodeHeader(node) {
 
 let allNodes = [];
 
+// Containers at or below this depth start collapsed, so the initial view shows
+// the field-name overview (body keys, witness keys) without all the noise.
+const COLLAPSE_DEPTH = 2;
+
 function renderTree(root) {
   const el = document.getElementById("tree");
   el.innerHTML = "";
   allNodes = [];
-  el.appendChild(renderNode(root, null));
+  el.appendChild(renderNode(root, null, 0));
 }
 
 // Expand/collapse a byte value, or copy it — via delegation so it works after re-render.
@@ -605,7 +609,8 @@ function attachHover(el, node) {
   el.addEventListener("mouseleave", (e) => { clearHighlight(); });
 }
 
-function renderNode(node, prefixHtml) {
+function renderNode(node, prefixHtml, depth) {
+  depth = depth || 0;
   const wrap = document.createElement("div");
   wrap.className = "node";
   const { row, hasChildren } = makeRow(node, prefixHtml);
@@ -613,6 +618,11 @@ function renderNode(node, prefixHtml) {
   attachHover(row, node);
 
   if (hasChildren) {
+    // collapse deep containers by default to cut noise
+    if (depth >= COLLAPSE_DEPTH) {
+      wrap.classList.add("collapsed");
+      row.querySelector(".twisty").textContent = "▸";
+    }
     const childWrap = document.createElement("div");
     childWrap.className = "children";
     row.addEventListener("click", (e) => {
@@ -629,18 +639,18 @@ function renderNode(node, prefixHtml) {
         let keyPrefix = "";
         if (entry.key.label) keyPrefix = `<span class="label">${entry.key.label}</span> = `;
         else keyPrefix = `${keyText(entry.key)} ⇒ `;
-        const valNode = renderNode(entry.val, keyPrefix);
+        const valNode = renderNode(entry.val, keyPrefix, depth + 1);
         // also wire the key's own byte range via the value row already covers val;
         childWrap.appendChild(valNode);
       }
     } else if (node.type === "tag") {
       if (node.inner) {
-        childWrap.appendChild(renderNode(node.inner, '<span class="v-type">decoded ⇒ </span>'));
+        childWrap.appendChild(renderNode(node.inner, '<span class="v-type">decoded ⇒ </span>', depth + 1));
       } else {
-        childWrap.appendChild(renderNode(node.children[0], ""));
+        childWrap.appendChild(renderNode(node.children[0], "", depth + 1));
       }
     } else {
-      for (const c of node.children) childWrap.appendChild(renderNode(c, ""));
+      for (const c of node.children) childWrap.appendChild(renderNode(c, "", depth + 1));
     }
     wrap.appendChild(childWrap);
   }
