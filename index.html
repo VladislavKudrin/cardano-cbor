@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cardano CBOR Decoder</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --key: #79c0ff;
+    --string: #a5d6ff;
+    --number: #d2a8ff;
+    --bytes: #ffa657;
+    --label: #7ee787;
+    --hl: #1f6feb;
+    --hl-bg: rgba(56, 139, 253, 0.25);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+  }
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  header h1 { font-size: 18px; margin: 0; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  .input-area {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  textarea {
+    width: 100%;
+    min-height: 90px;
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    resize: vertical;
+  }
+  .controls { margin-top: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  button {
+    background: #238636;
+    color: #fff;
+    border: none;
+    padding: 7px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  button.secondary { background: #21262d; border: 1px solid var(--border); color: var(--text); }
+  button:hover { filter: brightness(1.1); }
+  .err { color: #f85149; font-size: 13px; }
+  .panes {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    height: calc(100vh - 320px);
+    min-height: 360px;
+  }
+  .pane {
+    overflow: auto;
+    padding: 16px 24px;
+  }
+  .pane.left { border-right: 1px solid var(--border); }
+  .pane h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 12px; }
+  /* hex view */
+  #hex { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px; line-height: 1.7; }
+  .byte { padding: 1px 1px; border-radius: 3px; cursor: default; }
+  .byte.hl { background: var(--hl-bg); outline: 1px solid var(--hl); }
+  /* tree view */
+  .tree { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px; }
+  .node { padding-left: 18px; border-left: 1px solid transparent; }
+  .node > .row { padding: 2px 4px; border-radius: 4px; cursor: pointer; white-space: pre-wrap; }
+  .node > .row:hover, .node.hl > .row { background: var(--hl-bg); }
+  .label { color: var(--label); }
+  .twisty { color: var(--muted); display: inline-block; width: 12px; }
+  .v-key { color: var(--key); }
+  .v-string { color: var(--string); }
+  .v-number { color: var(--number); }
+  .v-bytes { color: var(--bytes); }
+  .bytes-val[data-expanded] { cursor: pointer; word-break: break-all; }
+  .bytes-val:hover { text-decoration: underline; }
+  .copy-btn { cursor: pointer; color: var(--muted); font-size: 12px; user-select: none; }
+  .copy-btn:hover { color: var(--accent); }
+  .v-type { color: var(--muted); font-size: 11px; }
+  .collapsed > .children { display: none; }
+  .decoded-extra { color: var(--accent); }
+  footer { padding: 10px 24px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Cardano CBOR Decoder</h1>
+  <span class="sub">paste tx CBOR hex → labeled structure with byte highlighting</span>
+</header>
+
+<div class="input-area">
+  <textarea id="input" placeholder="Paste Cardano transaction CBOR hex here (with or without 0x / whitespace)…"></textarea>
+  <div class="controls">
+    <button id="decode">Decode</button>
+    <button id="sample" class="secondary">Load sample tx</button>
+    <button id="clear" class="secondary">Clear</button>
+    <span id="error" class="err"></span>
+  </div>
+</div>
+
+<div class="panes">
+  <div class="pane left">
+    <h2>Hex bytes</h2>
+    <div id="hex"></div>
+  </div>
+  <div class="pane right">
+    <h2>Decoded structure</h2>
+    <div id="tree" class="tree"></div>
+  </div>
+</div>
+
+<footer>
+  Pure client-side · no data leaves your browser · Conway-era CDDL labels.
+  Hover a field or a byte to see the link.
+</footer>
+
+<script>
+"use strict";
+
+/* ---------- CBOR decoder with byte-range tracking ---------- */
+// Returns a tree of nodes: { type, value, start, end, children, label }
+// start/end are byte offsets (end exclusive) into the original buffer.
+
+function decodeCBOR(buf) {
+  let pos = 0;
+  let nodeId = 0;
+
+  function readUint(len) {
+    let n = 0;
+    for (let i = 0; i < len; i++) { n = n * 256 + buf[pos++]; }
+    return n;
+  }
+
+  function readHead() {
+    const ib = buf[pos++];
+    const major = ib >> 5;
+    const ai = ib & 0x1f;
+    let val, indefinite = false;
+    if (ai < 24) val = ai;
+    else if (ai === 24) val = readUint(1);
+    else if (ai === 25) val = readUint(2);
+    else if (ai === 26) val = readUint(4);
+    else if (ai === 27) val = readUint(8);
+    else if (ai === 31) indefinite = true;
+    else throw new Error("reserved additional info " + ai + " at byte " + (pos - 1));
+    return { major, ai, val, indefinite };
+  }
+
+  function decodeItem() {
+    const start = pos;
+    const id = nodeId++;
+    const h = readHead();
+    let node = { id, start, end: 0, type: "", value: undefined, children: null };
+
+    switch (h.major) {
+      case 0: // unsigned int
+        node.type = "uint"; node.value = h.val; break;
+      case 1: // negative int
+        node.type = "int"; node.value = -1 - h.val; break;
+      case 2: { // byte string
+        node.type = "bytes";
+        if (h.indefinite) {
+          const parts = [];
+          while (buf[pos] !== 0xff) { const c = decodeItem(); parts.push(c); }
+          pos++; // break
+          node.children = parts;
+          node.value = parts.map(p => p.value).reduce((a, b) => a.concat(Array.from(b)), []);
+          node.value = Uint8Array.from(node.value);
+        } else {
+          node.value = buf.slice(pos, pos + h.val); pos += h.val;
+        }
+        break;
+      }
+      case 3: { // text string
+        node.type = "text";
+        if (h.indefinite) {
+          let s = "";
+          while (buf[pos] !== 0xff) { const c = decodeItem(); s += c.value; }
+          pos++;
+          node.value = s;
+        } else {
+          node.value = new TextDecoder().decode(buf.slice(pos, pos + h.val)); pos += h.val;
+        }
+        break;
+      }
+      case 4: { // array
+        node.type = "array";
+        node.children = [];
+        node.indefinite = h.indefinite;
+        if (h.indefinite) {
+          while (buf[pos] !== 0xff) node.children.push(decodeItem());
+          pos++;
+        } else {
+          for (let i = 0; i < h.val; i++) node.children.push(decodeItem());
+        }
+        break;
+      }
+      case 5: { // map
+        node.type = "map";
+        node.children = []; // each child is {key, val}
+        node.indefinite = h.indefinite;
+        const n = h.indefinite ? Infinity : h.val;
+        for (let i = 0; i < n; i++) {
+          if (h.indefinite && buf[pos] === 0xff) { pos++; break; }
+          const k = decodeItem();
+          const v = decodeItem();
+          node.children.push({ kv: true, key: k, val: v });
+        }
+        break;
+      }
+      case 6: { // tag
+        node.type = "tag";
+        node.tag = h.val;
+        node.children = [decodeItem()];
+        break;
+      }
+      case 7: {
+        if (h.ai === 20) { node.type = "bool"; node.value = false; }
+        else if (h.ai === 21) { node.type = "bool"; node.value = true; }
+        else if (h.ai === 22) { node.type = "null"; node.value = null; }
+        else if (h.ai === 23) { node.type = "undefined"; node.value = undefined; }
+        else if (h.ai === 25 || h.ai === 26 || h.ai === 27) { node.type = "float"; node.value = h.val; }
+        else { node.type = "simple"; node.value = h.val; }
+        break;
+      }
+      default: throw new Error("unknown major type " + h.major);
+    }
+    node.end = pos;
+    return node;
+  }
+
+  const root = decodeItem();
+  if (pos !== buf.length) {
+    root.trailing = buf.length - pos;
+  }
+  return root;
+}
+
+/* ---------- Cardano CDDL labeling (Conway era) ---------- */
+
+const TX_BODY_KEYS = {
+  0: "inputs", 1: "outputs", 2: "fee", 3: "ttl", 4: "certificates",
+  5: "withdrawals", 7: "auxiliary_data_hash", 8: "validity_interval_start",
+  9: "mint", 11: "script_data_hash", 13: "collateral_inputs",
+  14: "required_signers", 15: "network_id", 16: "collateral_return",
+  17: "total_collateral", 18: "reference_inputs", 19: "voting_procedures",
+  20: "proposal_procedures", 21: "current_treasury_value", 22: "donation"
+};
+
+const WITNESS_KEYS = {
+  0: "vkey_witnesses", 1: "native_scripts", 2: "bootstrap_witnesses",
+  3: "plutus_v1_scripts", 4: "plutus_data", 5: "redeemers",
+  6: "plutus_v2_scripts", 7: "plutus_v3_scripts"
+};
+
+// Annotate a decoded tx tree with Cardano field labels.
+function labelCardanoTx(root) {
+  if (root.type !== "array" || !root.children) return root;
+  const top = root.children;
+  // [ body, witness_set, is_valid, auxiliary_data ]
+  if (top[0]) { top[0].label = "transaction_body"; labelBodyMap(top[0]); }
+  if (top[1]) { top[1].label = "witness_set"; labelKeyedMap(top[1], WITNESS_KEYS); }
+  if (top[2]) top[2].label = "is_valid";
+  if (top[3]) top[3].label = "auxiliary_data";
+  return root;
+}
+
+function labelBodyMap(node) { labelKeyedMap(node, TX_BODY_KEYS); }
+
+function labelKeyedMap(node, table) {
+  if (node.type === "tag" && node.children) node = node.children[0];
+  if (node.type !== "map" || !node.children) return;
+  for (const entry of node.children) {
+    if (entry.key && entry.key.type === "uint") {
+      const name = table[entry.key.value];
+      if (name) entry.key.label = name;
+    }
+  }
+}
+
+/* ---------- rendering ---------- */
+
+const byteSpans = []; // index -> span element
+
+function hexToBytes(hex) {
+  hex = hex.replace(/^0x/i, "").replace(/\s+/g, "");
+  if (hex.length % 2 !== 0) throw new Error("hex has odd length");
+  if (!/^[0-9a-fA-F]*$/.test(hex)) throw new Error("non-hex characters present");
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return out;
+}
+
+function renderHex(buf) {
+  const el = document.getElementById("hex");
+  el.innerHTML = "";
+  byteSpans.length = 0;
+  for (let i = 0; i < buf.length; i++) {
+    const span = document.createElement("span");
+    span.className = "byte";
+    span.textContent = buf[i].toString(16).padStart(2, "0");
+    span.dataset.i = i;
+    el.appendChild(span);
+    el.appendChild(document.createTextNode(" "));
+    byteSpans[i] = span;
+  }
+}
+
+function bytesToHex(arr) {
+  return Array.from(arr).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+// Shared: render a byte string as an expandable + copyable hex value.
+function bytesHtml(arr, colorClass) {
+  const hex = bytesToHex(arr);
+  const truncated = hex.length > 40;
+  const short = truncated ? hex.slice(0, 40) + "…" : hex;
+  return `<span class="${colorClass} bytes-val" data-full="${hex}" data-short="${short}" data-expanded="0" title="${truncated ? "click to expand" : ""}">h'${short}'</span>`
+    + ` <span class="copy-btn" title="copy hex">⧉</span>`;
+}
+
+function valuePreview(node) {
+  switch (node.type) {
+    case "uint": case "int": return `<span class="v-number">${node.value}</span>`;
+    case "float": return `<span class="v-number">${node.value}</span>`;
+    case "bool": return `<span class="v-number">${node.value}</span>`;
+    case "null": return `<span class="v-type">null</span>`;
+    case "text": return `<span class="v-string">"${escapeHtml(node.value)}"</span>`;
+    case "bytes":
+      return bytesHtml(node.value, "v-bytes") + ` <span class="v-type">(${node.value.length} bytes)</span>`;
+    default: return "";
+  }
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+}
+
+function nodeHeader(node) {
+  let s = "";
+  if (node.label) s += `<span class="label">${node.label}</span> `;
+  switch (node.type) {
+    case "array": s += `<span class="v-type">[array, ${node.children.length}${node.indefinite ? ", _" : ""}]</span>`; break;
+    case "map": s += `<span class="v-type">{map, ${node.children.length}${node.indefinite ? ", _" : ""}}</span>`; break;
+    case "tag": s += `<span class="v-type">tag(${node.tag})</span>`; break;
+    default: s += valuePreview(node);
+  }
+  return s;
+}
+
+let allNodes = [];
+
+function renderTree(root) {
+  const el = document.getElementById("tree");
+  el.innerHTML = "";
+  allNodes = [];
+  el.appendChild(renderNode(root, null));
+}
+
+// Expand/collapse a byte value, or copy it — via delegation so it works after re-render.
+function wireByteValueClicks() {
+  const tree = document.getElementById("tree");
+  tree.addEventListener("click", (e) => {
+    const copy = e.target.closest(".copy-btn");
+    if (copy) {
+      e.stopPropagation();
+      const bv = copy.parentElement.querySelector(".bytes-val");
+      if (!bv) return;
+      navigator.clipboard.writeText(bv.dataset.full).then(() => {
+        const prev = copy.textContent;
+        copy.textContent = "✓";
+        setTimeout(() => { copy.textContent = prev; }, 900);
+      }).catch(() => {});
+      return;
+    }
+    const bv = e.target.closest(".bytes-val");
+    if (bv) {
+      e.stopPropagation(); // don't toggle the row's collapse
+      const expanded = bv.dataset.expanded === "1";
+      bv.textContent = "h'" + (expanded ? bv.dataset.short : bv.dataset.full) + "'";
+      bv.dataset.expanded = expanded ? "0" : "1";
+    }
+  });
+}
+
+function makeRow(node, prefixHtml) {
+  const row = document.createElement("div");
+  row.className = "row";
+  const hasChildren = node.children && node.children.length > 0;
+  const twisty = hasChildren ? '<span class="twisty">▾</span>' : '<span class="twisty"></span>';
+  row.innerHTML = twisty + (prefixHtml || "") + nodeHeader(node);
+  return { row, hasChildren };
+}
+
+function attachHover(el, node) {
+  if (node.start === undefined) return;
+  allNodes.push({ node, el });
+  el.addEventListener("mouseenter", (e) => { e.stopPropagation(); highlightRange(node.start, node.end, el); });
+  el.addEventListener("mouseleave", (e) => { clearHighlight(); });
+}
+
+function renderNode(node, prefixHtml) {
+  const wrap = document.createElement("div");
+  wrap.className = "node";
+  const { row, hasChildren } = makeRow(node, prefixHtml);
+  wrap.appendChild(row);
+  attachHover(row, node);
+
+  if (hasChildren) {
+    const childWrap = document.createElement("div");
+    childWrap.className = "children";
+    row.addEventListener("click", (e) => {
+      // clicks on a hex value / copy button are handled elsewhere — don't toggle the row
+      if (e.target.closest(".bytes-val") || e.target.closest(".copy-btn")) return;
+      e.stopPropagation();
+      wrap.classList.toggle("collapsed");
+      row.querySelector(".twisty").textContent = wrap.classList.contains("collapsed") ? "▸" : "▾";
+    });
+
+    if (node.type === "map") {
+      for (const entry of node.children) {
+        // key row
+        let keyPrefix = "";
+        if (entry.key.label) keyPrefix = `<span class="label">${entry.key.label}</span> = `;
+        else keyPrefix = `${keyText(entry.key)} ⇒ `;
+        const valNode = renderNode(entry.val, keyPrefix);
+        // also wire the key's own byte range via the value row already covers val;
+        childWrap.appendChild(valNode);
+      }
+    } else if (node.type === "tag") {
+      childWrap.appendChild(renderNode(node.children[0], ""));
+    } else {
+      for (const c of node.children) childWrap.appendChild(renderNode(c, ""));
+    }
+    wrap.appendChild(childWrap);
+  }
+  return wrap;
+}
+
+function keyText(keyNode) {
+  if (keyNode.type === "uint" || keyNode.type === "int") return `<span class="v-key">${keyNode.value}</span>`;
+  if (keyNode.type === "text") return `<span class="v-key">"${escapeHtml(keyNode.value)}"</span>`;
+  if (keyNode.type === "bytes") return bytesHtml(keyNode.value, "v-key") + asciiHint(keyNode.value);
+  return `<span class="v-key">${keyNode.type}</span>`;
+}
+
+// If a byte string is printable ASCII (e.g. an asset name), show it as a hint.
+function asciiHint(arr) {
+  if (arr.length === 0 || arr.length > 64) return "";
+  let ok = true, s = "";
+  for (const b of arr) {
+    if (b < 0x20 || b > 0x7e) { ok = false; break; }
+    s += String.fromCharCode(b);
+  }
+  return ok ? ` <span class="v-type">("${escapeHtml(s)}")</span>` : "";
+}
+
+/* ---------- highlight linking ---------- */
+
+let highlightedEls = [];
+
+function highlightRange(start, end, treeEl) {
+  clearHighlight();
+  for (let i = start; i < end; i++) {
+    if (byteSpans[i]) { byteSpans[i].classList.add("hl"); highlightedEls.push(byteSpans[i]); }
+  }
+  if (treeEl) { treeEl.parentElement.classList.add("hl"); }
+  // scroll first byte into view
+  if (byteSpans[start]) byteSpans[start].scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+function clearHighlight() {
+  for (const el of highlightedEls) el.classList.remove("hl");
+  highlightedEls = [];
+  document.querySelectorAll(".node.hl").forEach(n => n.classList.remove("hl"));
+}
+
+// hover a byte → highlight smallest containing node
+function wireByteHover() {
+  const hex = document.getElementById("hex");
+  hex.addEventListener("mouseover", (e) => {
+    if (!e.target.dataset || e.target.dataset.i === undefined) return;
+    const i = +e.target.dataset.i;
+    let best = null;
+    for (const { node, el } of allNodes) {
+      if (node.start <= i && i < node.end) {
+        if (!best || (node.end - node.start) < (best.node.end - best.node.start)) best = { node, el };
+      }
+    }
+    if (best) {
+      highlightRange(best.node.start, best.node.end, null);
+      best.el.parentElement.classList.add("hl");
+      best.el.scrollIntoView({ block: "nearest" });
+    }
+  });
+  hex.addEventListener("mouseout", clearHighlight);
+}
+
+/* ---------- main ---------- */
+
+function run() {
+  const errEl = document.getElementById("error");
+  errEl.textContent = "";
+  try {
+    const buf = hexToBytes(document.getElementById("input").value);
+    if (buf.length === 0) throw new Error("no input");
+    renderHex(buf);
+    let root = decodeCBOR(buf);
+    root = labelCardanoTx(root);
+    renderTree(root);
+    if (root.trailing) errEl.textContent = `Note: ${root.trailing} trailing byte(s) after first CBOR item.`;
+  } catch (e) {
+    errEl.textContent = "Decode error: " + e.message;
+  }
+}
+
+document.getElementById("decode").addEventListener("click", run);
+document.getElementById("clear").addEventListener("click", () => {
+  document.getElementById("input").value = "";
+  document.getElementById("hex").innerHTML = "";
+  document.getElementById("tree").innerHTML = "";
+  document.getElementById("error").textContent = "";
+});
+document.getElementById("sample").addEventListener("click", () => {
+  // Minimal simple tx: body{0:[input],1:[output],2:fee}, empty witnesses, valid, no aux
+  document.getElementById("input").value = SAMPLE_TX;
+  run();
+});
+
+// A small, valid simple-transaction CBOR: 1 input, 1 output, fee, ttl,
+// empty witness set, is_valid=true, no auxiliary data.
+const SAMPLE_TX =
+  "84a400818258203b40265111d8bb3c3c608d95b3a0bf83461ace32d79336579a1939b3" +
+  "aad1c0b7000181825839001f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f" +
+  "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1a002d" +
+  "c6c0021a0002a8ad03190bb8a0f5f6";
+
+wireByteHover();
+wireByteValueClicks();
+</script>
+</body>
+</html>
